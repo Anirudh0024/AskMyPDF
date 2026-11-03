@@ -5,18 +5,16 @@ version = "0.1.0"
 description = "Retrieval Augmented Generation Project"
 requires-python = ">=3.14"
 dependencies = [
-    "langchain[huggingface]>=1.4.7",
     "langchain-chroma",
     "langchain-groq",
-    "langchain-huggingface",
     "python-dotenv",
-    "sentence-transformers>=6.2.0",
-    "torch>=2.14.1",
-    "transformers>=5.20.2",
     "langchain-community>=0.4.2",
     "pypdf>=6.21.4",
     "streamlit>=1.66.1",
     "langchain-text-splitters>=1.1.3",
+    "langchain-core>=1.7.4",
+    "langchain-google-genai>=4.4.2",
+    "langchain>=1.4.8",
 ]
 
 [tool.uv]

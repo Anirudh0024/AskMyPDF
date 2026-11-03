@@ -1,46 +1,105 @@
-from pathlib import Path
+import os
 import tempfile
 import uuid
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
+
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.embeddings import Embeddings
 
 # ==================================================
 # 1. PAGE CONFIGURATION
 # ==================================================
 
-st.set_page_config(page_title="AI Research Assistant", page_icon="📚", layout="wide")
+st.set_page_config(page_title="AskMyPDF", page_icon="📚", layout="wide")
 
-BASE_DIR = Path(__file__).parent
-load_dotenv(BASE_DIR / ".env")
+BASE_DIR = Path(__file__).resolve().parent
+
+# Load environment variables from the project directory.
+# On Render, environment variables are supplied by Render itself.
+load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
 
 
 # ==================================================
-# 2. LOAD MODELS (LAZY LOADING + CACHING)
+# 2. GEMINI HOSTED EMBEDDINGS
 # ==================================================
+
+
+class GeminiRAGEmbeddings(Embeddings):
+    """
+    Google Gemini hosted embeddings.
+
+    Documents use RETRIEVAL_DOCUMENT.
+    Questions use RETRIEVAL_QUERY.
+
+    No local Hugging Face or PyTorch model is loaded.
+    """
+
+    def __init__(self):
+
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+
+        if not api_key:
+            raise RuntimeError(
+                "GOOGLE_API_KEY is missing. Add it to your "
+                ".env file and Render environment variables."
+            )
+
+        self.document_embeddings = GoogleGenerativeAIEmbeddings(
+            model="gemini-embedding-001",
+            task_type="RETRIEVAL_DOCUMENT",
+            google_api_key=api_key,
+        )
+
+        self.query_embeddings = GoogleGenerativeAIEmbeddings(
+            model="gemini-embedding-001",
+            task_type="RETRIEVAL_QUERY",
+            google_api_key=api_key,
+        )
+
+    def embed_documents(self, texts):
+
+        return self.document_embeddings.embed_documents(texts)
+
+    def embed_query(self, text):
+
+        return self.query_embeddings.embed_query(text)
 
 
 @st.cache_resource
 def load_embeddings():
-    from langchain_huggingface import HuggingFaceEmbeddings
 
-    return HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True, "batch_size": 32},
-    )
+    return GeminiRAGEmbeddings()
+
+
+# ==================================================
+# 3. GROQ LLM
+# ==================================================
 
 
 @st.cache_resource
 def load_llm():
-    from langchain.chat_models import init_chat_model
 
-    return init_chat_model("groq:openai/gpt-oss-120b")
+    from langchain_groq import ChatGroq
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+
+    if not groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is missing.")
+
+    return ChatGroq(
+        model="openai/gpt-oss-120b",
+        api_key=groq_api_key,
+        temperature=0,
+    )
 
 
 # ==================================================
-# 3. PROMPTS
+# 4. PROMPTS
 # ==================================================
 
 qa_prompt = ChatPromptTemplate.from_messages(
@@ -55,7 +114,7 @@ qa_prompt = ChatPromptTemplate.from_messages(
             Rules:
             1. Give accurate and useful answers.
             2. Explain difficult concepts in simple language.
-            3. Use conversation history to understand follow-up questions.
+            3. Use conversation history for follow-up questions.
             4. Do not invent information.
             5. If the answer is not present in the context,
                say that you could not find it in the documents.
@@ -89,6 +148,7 @@ map_prompt = ChatPromptTemplate.from_messages(
             Create a concise but informative summary.
             Preserve important facts, methods, findings,
             numbers and technical terms.
+
             Do not add information that is not in the section.
             """,
         ),
@@ -138,7 +198,7 @@ reduce_prompt = ChatPromptTemplate.from_messages(
 
 
 # ==================================================
-# 4. SESSION STATE
+# 5. SESSION STATE
 # ==================================================
 
 defaults = {
@@ -152,12 +212,13 @@ defaults = {
 }
 
 for key, value in defaults.items():
+
     if key not in st.session_state:
         st.session_state[key] = value
 
 
 # ==================================================
-# 5. INITIALIZE VECTOR DATABASE
+# 6. INITIALIZE CHROMA DATABASE
 # ==================================================
 
 
@@ -168,7 +229,7 @@ def initialize_database():
 
     from langchain_chroma import Chroma
 
-    db_path = Path(tempfile.gettempdir()) / f"research_assistant_{uuid.uuid4().hex}"
+    db_path = Path(tempfile.gettempdir()) / f"askmypdf_{uuid.uuid4().hex}"
 
     embeddings = load_embeddings()
 
@@ -185,13 +246,14 @@ def initialize_database():
 
 
 # ==================================================
-# 6. PROCESS PDF DOCUMENTS
+# 7. PROCESS PDF DOCUMENTS
 # ==================================================
 
 
 def process_documents(uploaded_files):
 
     from langchain_community.document_loaders import PyPDFLoader
+
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     vectorstore = initialize_database()
@@ -204,37 +266,44 @@ def process_documents(uploaded_files):
 
         source_id = uuid.uuid4().hex
 
-        # Save PDF temporarily
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
-
-            temp_file.write(uploaded_file.getvalue())
-            temp_path = Path(temp_file.name)
+        temp_path = None
 
         try:
 
-            # Load PDF
+            # Save uploaded PDF temporarily.
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
+
+                temp_file.write(uploaded_file.getvalue())
+
+                temp_path = Path(temp_file.name)
+
+            # Load PDF.
             loader = PyPDFLoader(str(temp_path))
+
             documents = loader.load()
 
             if not documents:
                 raise ValueError(f"No pages found in {uploaded_file.name}")
 
-            # Add metadata
+            # Add metadata.
             for document in documents:
+
                 document.metadata["source"] = uploaded_file.name
+
                 document.metadata["source_id"] = source_id
 
-            # Split into chunks
+            # Split PDF into chunks.
             chunks = splitter.split_documents(documents)
 
             if not chunks:
+
                 raise ValueError(
                     f"No readable text found in {uploaded_file.name}. "
-                    "If this is a scanned PDF, OCR is required."
+                    "Scanned PDFs may require OCR."
                 )
 
-            # Store chunks in batches
-            batch_size = 32
+            # Store chunks in smaller batches.
+            batch_size = 16
 
             for start in range(0, len(chunks), batch_size):
 
@@ -252,13 +321,16 @@ def process_documents(uploaded_files):
             )
 
         finally:
-            temp_path.unlink(missing_ok=True)
+
+            if temp_path and temp_path.exists():
+
+                temp_path.unlink(missing_ok=True)
 
     return processed
 
 
 # ==================================================
-# 7. DELETE DOCUMENT
+# 8. DELETE DOCUMENT
 # ==================================================
 
 
@@ -267,6 +339,7 @@ def delete_document(source_id):
     vectorstore = st.session_state.vectorstore
 
     if vectorstore is not None:
+
         vectorstore.delete(where={"source_id": source_id})
 
     st.session_state.documents.pop(source_id, None)
@@ -276,12 +349,14 @@ def delete_document(source_id):
     ]
 
     st.session_state.messages = []
+
     st.session_state.chat_document_key = None
+
     st.session_state.last_summary = None
 
 
 # ==================================================
-# 8. RETRIEVE DOCUMENTS
+# 9. RETRIEVE DOCUMENTS
 # ==================================================
 
 
@@ -306,7 +381,7 @@ def retrieve_documents(question, selected_ids):
 
 
 # ==================================================
-# 9. CHAT HISTORY
+# 10. CHAT HISTORY
 # ==================================================
 
 
@@ -314,7 +389,7 @@ def get_chat_history():
 
     history = []
 
-    # Exclude the current question because it is passed separately.
+    # Exclude the latest question because it is passed separately.
     for message in st.session_state.messages[:-1][-8:]:
 
         role = message["role"].upper()
@@ -325,7 +400,7 @@ def get_chat_history():
 
 
 # ==================================================
-# 10. ANSWER QUESTIONS
+# 11. GENERATE ANSWERS
 # ==================================================
 
 
@@ -334,9 +409,11 @@ def generate_answer(question, selected_ids):
     docs = retrieve_documents(question, selected_ids)
 
     if not docs:
+
         return ("I could not find the answer in the uploaded documents.", [])
 
     context_parts = []
+
     sources = []
 
     for doc in docs:
@@ -356,13 +433,21 @@ def generate_answer(question, selected_ids):
             """)
 
         sources.append(
-            {"filename": filename, "page": page_number, "content": doc.page_content}
+            {
+                "filename": filename,
+                "page": page_number,
+                "content": doc.page_content,
+            }
         )
 
     context = "\n\n".join(context_parts)
 
     final_prompt = qa_prompt.invoke(
-        {"context": context, "question": question, "chat_history": get_chat_history()}
+        {
+            "context": context,
+            "question": question,
+            "chat_history": get_chat_history(),
+        }
     )
 
     response = load_llm().invoke(final_prompt)
@@ -371,7 +456,7 @@ def generate_answer(question, selected_ids):
 
 
 # ==================================================
-# 11. GET ALL CHUNKS FOR SELECTED DOCUMENTS
+# 12. GET DOCUMENT CHUNKS
 # ==================================================
 
 
@@ -379,21 +464,30 @@ def get_document_chunks(selected_ids):
 
     vectorstore = st.session_state.vectorstore
 
+    if vectorstore is None:
+        return []
+
     result = vectorstore.get(
-        where={"source_id": {"$in": selected_ids}}, include=["documents", "metadatas"]
+        where={"source_id": {"$in": selected_ids}},
+        include=["documents", "metadatas"],
     )
 
     chunks = []
 
     for content, metadata in zip(result["documents"], result["metadatas"]):
 
-        chunks.append({"content": content, "metadata": metadata})
+        chunks.append(
+            {
+                "content": content,
+                "metadata": metadata,
+            }
+        )
 
     return chunks
 
 
 # ==================================================
-# 12. COMPLETE DOCUMENT SUMMARIZATION
+# 13. COMPLETE DOCUMENT SUMMARIZATION
 # ==================================================
 
 
@@ -409,9 +503,12 @@ def summarize_documents(selected_ids):
     summaries = []
 
     progress = st.progress(0)
+
     status = st.empty()
 
-    # MAP: Summarize every chunk
+    # MAP STEP
+    # Summarize each document chunk.
+
     for index, chunk in enumerate(chunks):
 
         status.write(f"Summarizing section {index + 1} of {len(chunks)}...")
@@ -422,7 +519,9 @@ def summarize_documents(selected_ids):
 
         progress.progress((index + 1) / len(chunks))
 
-    # REDUCE: Combine summaries in smaller groups
+    # REDUCE STEP
+    # Combine summaries in groups.
+
     while len(summaries) > 1:
 
         new_summaries = []
@@ -440,32 +539,30 @@ def summarize_documents(selected_ids):
         summaries = new_summaries
 
     progress.empty()
+
     status.empty()
 
     return summaries[0]
 
 
 # ==================================================
-# 13. MAIN HEADER
+# 14. MAIN HEADER
 # ==================================================
 
-st.title("📚 AI Research Assistant")
+st.title("📚 AskMyPDF")
 
 st.markdown("""
     Upload research papers, ask questions and generate
     comprehensive summaries using AI.
     """)
 
-st.caption(
-    "The homepage loads first. AI models are initialized "
-    "only when you upload a PDF or ask a question."
-)
+st.caption("Your AI-powered document research assistant.")
 
 st.divider()
 
 
 # ==================================================
-# 14. SIDEBAR
+# 15. SIDEBAR
 # ==================================================
 
 with st.sidebar:
@@ -473,11 +570,15 @@ with st.sidebar:
     st.header("📂 Document Library")
 
     uploaded_files = st.file_uploader(
-        "Upload PDF documents", type=["pdf"], accept_multiple_files=True
+        "Upload PDF documents",
+        type=["pdf"],
+        accept_multiple_files=True,
     )
 
     if st.button(
-        "Process Documents", use_container_width=True, disabled=not uploaded_files
+        "Process Documents",
+        use_container_width=True,
+        disabled=not uploaded_files,
     ):
 
         try:
@@ -495,14 +596,18 @@ with st.sidebar:
                         st.session_state.selected_documents.append(document["id"])
 
                 st.session_state.messages = []
+
                 st.session_state.chat_document_key = None
+
                 st.session_state.last_summary = None
 
             st.success(f"{len(processed)} document(s) processed!")
 
+            st.rerun()
+
         except Exception as error:
 
-            st.error(str(error))
+            st.error(f"Document processing failed: {error}")
 
     st.divider()
 
@@ -519,6 +624,7 @@ with st.sidebar:
             with st.expander(document["name"]):
 
                 st.write(f"Pages: {document['pages']}")
+
                 st.write(f"Chunks: {document['chunks']}")
 
                 if st.button(
@@ -528,6 +634,7 @@ with st.sidebar:
                 ):
 
                     delete_document(source_id)
+
                     st.rerun()
 
     st.divider()
@@ -535,12 +642,14 @@ with st.sidebar:
     if st.button("Clear conversation", use_container_width=True):
 
         st.session_state.messages = []
+
         st.session_state.last_summary = None
+
         st.rerun()
 
 
 # ==================================================
-# 15. DOCUMENT SELECTION
+# 16. DOCUMENT SELECTION
 # ==================================================
 
 if not st.session_state.documents:
@@ -569,24 +678,29 @@ selected_ids = [document_options[label] for label in selected_labels]
 
 st.session_state.selected_documents = selected_ids
 
+
 if not selected_ids:
 
     st.warning("Please select at least one document.")
+
     st.stop()
 
 
-# Reset chat when document selection changes
+# Reset conversation when document selection changes.
+
 selection_key = tuple(sorted(selected_ids))
 
 if st.session_state.chat_document_key != selection_key:
 
     st.session_state.messages = []
+
     st.session_state.chat_document_key = selection_key
+
     st.session_state.last_summary = None
 
 
 # ==================================================
-# 16. SUMMARY FEATURE
+# 17. DOCUMENT SUMMARIZATION UI
 # ==================================================
 
 st.subheader("📖 Document Summarization")
@@ -595,7 +709,7 @@ if st.button("Generate complete summary"):
 
     try:
 
-        with st.spinner("Generating summary from all selected document chunks..."):
+        with st.spinner("Generating summary from all selected documents..."):
 
             summary = summarize_documents(selected_ids)
 
@@ -617,7 +731,7 @@ st.divider()
 
 
 # ==================================================
-# 17. CHAT HISTORY DISPLAY
+# 18. CHAT HISTORY DISPLAY
 # ==================================================
 
 st.subheader("💬 Chat with your documents")
@@ -634,7 +748,7 @@ for message in st.session_state.messages:
 
                 for source in message["sources"]:
 
-                    st.markdown(f"**{source['filename']} — Page {source['page']}**")
+                    st.markdown(f"**{source['filename']} — " f"Page {source['page']}**")
 
                     st.write(source["content"])
 
@@ -642,16 +756,22 @@ for message in st.session_state.messages:
 
 
 # ==================================================
-# 18. CHAT INPUT
+# 19. CHAT INPUT
 # ==================================================
 
 query = st.chat_input("Ask a question about your selected documents...")
 
 if query:
 
-    st.session_state.messages.append({"role": "user", "content": query})
+    st.session_state.messages.append(
+        {
+            "role": "user",
+            "content": query,
+        }
+    )
 
     with st.chat_message("user"):
+
         st.markdown(query)
 
     with st.chat_message("assistant"):
@@ -670,14 +790,20 @@ if query:
 
                     for source in sources:
 
-                        st.markdown(f"**{source['filename']} — Page {source['page']}**")
+                        st.markdown(
+                            f"**{source['filename']} — " f"Page {source['page']}**"
+                        )
 
                         st.write(source["content"])
 
                         st.divider()
 
             st.session_state.messages.append(
-                {"role": "assistant", "content": answer, "sources": sources}
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "sources": sources,
+                }
             )
 
         except Exception as error:
@@ -687,5 +813,9 @@ if query:
             st.error(error_message)
 
             st.session_state.messages.append(
-                {"role": "assistant", "content": error_message, "sources": []}
+                {
+                    "role": "assistant",
+                    "content": error_message,
+                    "sources": [],
+                }
             )
