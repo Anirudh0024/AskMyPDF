@@ -3,16 +3,8 @@ import tempfile
 import uuid
 
 import streamlit as st
-
 from dotenv import load_dotenv
-
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chat_models import init_chat_model
 
 # ==================================================
 # 1. PAGE CONFIGURATION
@@ -25,18 +17,24 @@ load_dotenv(BASE_DIR / ".env")
 
 
 # ==================================================
-# 2. LOAD MODELS
+# 2. LOAD MODELS (LAZY LOADING + CACHING)
 # ==================================================
 
 
 @st.cache_resource
 def load_embeddings():
+    from langchain_huggingface import HuggingFaceEmbeddings
 
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True, "batch_size": 32},
+    )
 
 
 @st.cache_resource
 def load_llm():
+    from langchain.chat_models import init_chat_model
 
     return init_chat_model("groq:openai/gpt-oss-120b")
 
@@ -50,88 +48,90 @@ qa_prompt = ChatPromptTemplate.from_messages(
         (
             "system",
             """
-        You are an intelligent research assistant.
+            You are an intelligent research assistant.
 
-        Answer questions using ONLY the supplied document context.
+            Answer questions using ONLY the supplied document context.
 
-        Rules:
-        1. Give accurate and useful answers.
-        2. Explain difficult concepts in simple language.
-        3. Use conversation history to understand follow-up questions.
-        4. Do not invent information.
-        5. If the answer is not present in the context,
-           say that you could not find it in the documents.
-        6. Mention source filenames and page numbers when available.
-        """,
+            Rules:
+            1. Give accurate and useful answers.
+            2. Explain difficult concepts in simple language.
+            3. Use conversation history to understand follow-up questions.
+            4. Do not invent information.
+            5. If the answer is not present in the context,
+               say that you could not find it in the documents.
+            6. Mention source filenames and page numbers when available.
+            """,
         ),
         (
             "human",
             """
-        Previous conversation:
-        {chat_history}
+            Previous conversation:
+            {chat_history}
 
-        Retrieved document context:
-        {context}
+            Retrieved document context:
+            {context}
 
-        Current question:
-        {question}
-        """,
+            Current question:
+            {question}
+            """,
         ),
     ]
 )
+
 
 map_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
             """
-        You are summarizing a section of a research document.
+            You are summarizing a section of a research document.
 
-        Create a concise but informative summary.
-        Preserve important facts, methods, findings,
-        numbers and technical terms.
-        Do not add information that is not in the section.
-        """,
+            Create a concise but informative summary.
+            Preserve important facts, methods, findings,
+            numbers and technical terms.
+            Do not add information that is not in the section.
+            """,
         ),
         (
             "human",
             """
-        Summarize this section:
+            Summarize this section:
 
-        {text}
-        """,
+            {text}
+            """,
         ),
     ]
 )
+
 
 reduce_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
             """
-        You are creating a comprehensive research paper summary.
+            You are creating a comprehensive research paper summary.
 
-        Combine the supplied section summaries into one coherent summary.
+            Combine the supplied section summaries into one coherent summary.
 
-        Include:
-        1. Research background
-        2. Main objective
-        3. Methodology
-        4. Important findings
-        5. Conclusions
-        6. Limitations, if mentioned
+            Include:
+            1. Research background
+            2. Main objective
+            3. Methodology
+            4. Important findings
+            5. Conclusions
+            6. Limitations, if mentioned
 
-        Do not invent information.
-        Preserve important technical details.
-        """,
+            Do not invent information.
+            Preserve important technical details.
+            """,
         ),
         (
             "human",
             """
-        Section summaries:
+            Section summaries:
 
-        {summaries}
-        """,
+            {summaries}
+            """,
         ),
     ]
 )
@@ -148,10 +148,10 @@ defaults = {
     "db_path": None,
     "selected_documents": [],
     "chat_document_key": None,
+    "last_summary": None,
 }
 
 for key, value in defaults.items():
-
     if key not in st.session_state:
         st.session_state[key] = value
 
@@ -165,6 +165,8 @@ def initialize_database():
 
     if st.session_state.vectorstore is not None:
         return st.session_state.vectorstore
+
+    from langchain_chroma import Chroma
 
     db_path = Path(tempfile.gettempdir()) / f"research_assistant_{uuid.uuid4().hex}"
 
@@ -189,9 +191,12 @@ def initialize_database():
 
 def process_documents(uploaded_files):
 
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
     vectorstore = initialize_database()
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
 
     processed = []
 
@@ -216,7 +221,6 @@ def process_documents(uploaded_files):
 
             # Add metadata
             for document in documents:
-
                 document.metadata["source"] = uploaded_file.name
                 document.metadata["source_id"] = source_id
 
@@ -224,10 +228,19 @@ def process_documents(uploaded_files):
             chunks = splitter.split_documents(documents)
 
             if not chunks:
-                raise ValueError(f"No readable text found in {uploaded_file.name}")
+                raise ValueError(
+                    f"No readable text found in {uploaded_file.name}. "
+                    "If this is a scanned PDF, OCR is required."
+                )
 
-            # Store in Chroma
-            vectorstore.add_documents(chunks)
+            # Store chunks in batches
+            batch_size = 32
+
+            for start in range(0, len(chunks), batch_size):
+
+                batch = chunks[start : start + batch_size]
+
+                vectorstore.add_documents(batch)
 
             processed.append(
                 {
@@ -239,7 +252,6 @@ def process_documents(uploaded_files):
             )
 
         finally:
-
             temp_path.unlink(missing_ok=True)
 
     return processed
@@ -255,7 +267,6 @@ def delete_document(source_id):
     vectorstore = st.session_state.vectorstore
 
     if vectorstore is not None:
-
         vectorstore.delete(where={"source_id": source_id})
 
     st.session_state.documents.pop(source_id, None)
@@ -266,6 +277,7 @@ def delete_document(source_id):
 
     st.session_state.messages = []
     st.session_state.chat_document_key = None
+    st.session_state.last_summary = None
 
 
 # ==================================================
@@ -276,6 +288,9 @@ def delete_document(source_id):
 def retrieve_documents(question, selected_ids):
 
     vectorstore = st.session_state.vectorstore
+
+    if vectorstore is None:
+        return []
 
     retriever = vectorstore.as_retriever(
         search_type="mmr",
@@ -299,8 +314,8 @@ def get_chat_history():
 
     history = []
 
-    # Use recent conversation turns
-    for message in st.session_state.messages[-8:]:
+    # Exclude the current question because it is passed separately.
+    for message in st.session_state.messages[:-1][-8:]:
 
         role = message["role"].upper()
 
@@ -441,6 +456,11 @@ st.markdown("""
     comprehensive summaries using AI.
     """)
 
+st.caption(
+    "The homepage loads first. AI models are initialized "
+    "only when you upload a PDF or ask a question."
+)
+
 st.divider()
 
 
@@ -471,10 +491,12 @@ with st.sidebar:
                     st.session_state.documents[document["id"]] = document
 
                     if document["id"] not in st.session_state.selected_documents:
+
                         st.session_state.selected_documents.append(document["id"])
 
                 st.session_state.messages = []
                 st.session_state.chat_document_key = None
+                st.session_state.last_summary = None
 
             st.success(f"{len(processed)} document(s) processed!")
 
@@ -513,6 +535,7 @@ with st.sidebar:
     if st.button("Clear conversation", use_container_width=True):
 
         st.session_state.messages = []
+        st.session_state.last_summary = None
         st.rerun()
 
 
@@ -552,13 +575,14 @@ if not selected_ids:
     st.stop()
 
 
-# Reset chat when the document selection changes
+# Reset chat when document selection changes
 selection_key = tuple(sorted(selected_ids))
 
 if st.session_state.chat_document_key != selection_key:
 
     st.session_state.messages = []
     st.session_state.chat_document_key = selection_key
+    st.session_state.last_summary = None
 
 
 # ==================================================
@@ -567,7 +591,7 @@ if st.session_state.chat_document_key != selection_key:
 
 st.subheader("📖 Document Summarization")
 
-if st.button("Generate complete summary", use_container_width=False):
+if st.button("Generate complete summary"):
 
     try:
 
@@ -582,7 +606,7 @@ if st.button("Generate complete summary", use_container_width=False):
         st.error(f"Summarization failed: {error}")
 
 
-if "last_summary" in st.session_state:
+if st.session_state.last_summary:
 
     with st.expander("📄 Complete document summary", expanded=True):
 
@@ -610,7 +634,7 @@ for message in st.session_state.messages:
 
                 for source in message["sources"]:
 
-                    st.markdown(f"**{source['filename']} — " f"Page {source['page']}**")
+                    st.markdown(f"**{source['filename']} — Page {source['page']}**")
 
                     st.write(source["content"])
 
@@ -646,9 +670,7 @@ if query:
 
                     for source in sources:
 
-                        st.markdown(
-                            f"**{source['filename']} — " f"Page {source['page']}**"
-                        )
+                        st.markdown(f"**{source['filename']} — Page {source['page']}**")
 
                         st.write(source["content"])
 
