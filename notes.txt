@@ -1,0 +1,104 @@
+CORRELATION VS COVARIANCE — STATISTICS NOTES
+==============================================
+
+1. COVARIANCE
+------------
+Definition:
+Covariance measures how two variables vary together. It indicates whether they tend to move in the same direction or in opposite directions.
+
+Formula (population covariance):
+Cov(X, Y) = Σ[(Xi - μX)(Yi - μY)] / N
+
+Formula (sample covariance):
+sXY = Σ[(Xi - X̄)(Yi - Ȳ)] / (n - 1)
+
+Interpretation:
+- Positive covariance: X and Y tend to increase or decrease together.
+- Negative covariance: when X is above its mean, Y tends to be below its mean, and vice versa.
+- Covariance near zero: there is little or no linear co-movement in the data. This does not rule out a nonlinear relationship.
+
+Important point:
+- Covariance depends on the units and scales of the variables.
+- Its numerical size is difficult to interpret by itself.
+
+2. CORRELATION
+--------------
+Definition:
+Correlation measures the strength and direction of the LINEAR relationship between two variables. Pearson's correlation coefficient is the most commonly used form.
+
+Formula:
+r = Cov(X, Y) / (sX × sY)
+
+where:
+- Cov(X, Y) = sample covariance
+- sX = sample standard deviation of X
+- sY = sample standard deviation of Y
+
+Interpretation of Pearson's r:
+- r = +1: perfect positive linear relationship.
+- r close to +1: strong positive linear relationship.
+- r = 0: no linear relationship (a nonlinear relationship may still exist).
+- r close to -1: strong negative linear relationship.
+- r = -1: perfect negative linear relationship.
+
+Important points:
+- Correlation is unitless.
+- Its value always lies between -1 and +1.
+- It is easier to compare across datasets than covariance.
+
+3. KEY DIFFERENCES
+------------------
+Covariance:
+- Shows the direction of joint variation.
+- Can take any real value.
+- Depends on the units/scales of the variables.
+- Magnitude is not standardized, so it is hard to compare.
+
+Correlation:
+- Shows direction and strength of a linear relationship.
+- Always lies between -1 and +1.
+- Has no units.
+- Standardized, so comparisons are easier.
+
+4. SIMPLE EXAMPLE
+-----------------
+Suppose study time and exam score tend to increase together.
+
+- Their covariance would generally be positive.
+- Their correlation would also be positive if the relationship is linear.
+- A correlation of +0.85 would indicate a strong positive linear relationship.
+- The covariance's numerical value depends on how study time and scores are measured.
+
+5. RELATIONSHIP BETWEEN THEM
+----------------------------
+Correlation is standardized covariance:
+
+Correlation = Covariance / (standard deviation of X × standard deviation of Y)
+
+Therefore:
+- If both standard deviations are positive, covariance and Pearson correlation have the same sign.
+- Correlation rescales covariance to a fixed range from -1 to +1.
+- If either variable has zero variance (it is constant), Pearson correlation is undefined.
+
+6. COMMON MISUNDERSTANDINGS
+---------------------------
+- Correlation does not prove causation.
+- A correlation of zero means no linear relationship, not necessarily no relationship at all.
+- A large covariance does not automatically mean a strong relationship because its size depends on units.
+- Pearson correlation can be affected by outliers.
+- Pearson correlation describes linear association; other methods may be needed for nonlinear patterns.
+
+7. QUICK MEMORY TRICK
+---------------------
+COVARIANCE = direction of how two variables vary together.
+CORRELATION = direction + strength of their linear relationship, on a standardized scale.
+
+8. QUICK REVISION TABLE
+-----------------------
+Feature              Covariance                 Correlation
+Meaning              Joint variation            Linear direction and strength
+Possible values      Any real number            -1 to +1
+Units                Has units                  Unitless
+Easy to compare?     Usually not                Usually yes
+Sign                 Direction                  Direction
+Magnitude            Scale-dependent            Standardized

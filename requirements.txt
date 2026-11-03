@@ -1,0 +1,26 @@
+# LangChain core and model integrations
+langchain
+langchain-core
+langchain-community
+langchain-classic
+langchain-groq
+langchain-huggingface
+langchain-text-splitters
+
+# Hugging Face embeddings
+sentence-transformers
+transformers
+torch
+
+# Vector database (local)
+faiss-cpu
+
+# Document loading
+pypdf
+unstructured
+
+# Environment variables
+python-dotenv
+
+# Optional: useful for a Streamlit RAG interface
+streamlit
